@@ -16,7 +16,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics import Accuracy
 from torchmetrics import AUROC
 from torchmetrics import AveragePrecision
-from torchmetrics import MetricCollection
 
 from transformers import BertModel
 from transformers import BertTokenizer
@@ -47,8 +46,13 @@ def L2D(batch):
 
 class BertNliRegu(pl.LightningModule):
 
-    def __init__(self, freeze_bert=False, criterion=nn.CrossEntropyLoss(), reg_mul=0, lr=5e-5,
+    def __init__(self, freeze_bert=False,
+                 criterion=nn.CrossEntropyLoss(),
+                 reg_mul=0,
+                 pen_type: str = "lasso",
+                 lr=5e-5,
                  exp: bool = False):
+
         super().__init__()
         self.exp = exp
         self.save_hyperparameters("reg_mul", ignore=["exp"])
@@ -57,9 +61,8 @@ class BertNliRegu(pl.LightningModule):
 
         # bert layer
         # the bert layer will return the layer will return the attention weights
-        self.bert = BertModel.from_pretrained('bert-base-uncased',
-                                              output_attentions=True,  # return the attention
-                                              output_hidden_states=True  # return the hidden states of the models
+        self.bert = BertModel.from_pretrained('bert-base-uncased', output_attentions=True
+                                              # return the attention weights
                                               )
 
         # classifier head
@@ -70,9 +73,10 @@ class BertNliRegu(pl.LightningModule):
         # multiplier of the reg term
         # if this term is high >> high regularization
         self.reg_mul = reg_mul
+        self.pen_type = pen_type
         self.criterion = criterion
 
-        # metrics
+        # metrics for the tensorboard
         self.acc = nn.ModuleDict({
             'TRAIN': Accuracy(num_classes=3),
             'VAL': Accuracy(num_classes=3),
@@ -109,7 +113,7 @@ class BertNliRegu(pl.LightningModule):
     ### regularization function ###
     ###############################
 
-    def entropy_regu(self, outputs, input_ids):
+    def entropy_regu(self, outputs, input_ids, h_annot, pen_type: str = "lasso"):
         # the mask for the specials tokens
         spe_ids = torch.tensor([0, 101, 102]).to(self.device)
         spe_tok_mask = torch.isin(input_ids, spe_ids)
@@ -131,10 +135,15 @@ class BertNliRegu(pl.LightningModule):
         ent_4_10 = (-a_hat_4_10 * torch.log(a_hat_4_10 + EPS)).sum(dim=-1)
         nb_tokens = torch.logical_not(spe_tok_mask).type(torch.float).sum(dim=-1)
         log_t = torch.log(nb_tokens)
-        h = (ent_4_10 / log_t).mean(dim=0)
+        h = ent_4_10 / log_t
 
-        # return the penalisation score and the model annotations
-        return {"pen": h, "scores": a_hat_4_10}
+        if pen_type == "lasso":
+            # use of absolute values
+            pen = (torch.abs(h - h_annot)).mean(dim=0)
+        else:
+            pen = (torch.square(h - h_annot)).mean(dim=0)
+
+        return {"pen": pen, "scores": a_hat_4_10}
 
     #######################
     ### steps functions ###
@@ -151,23 +160,20 @@ class BertNliRegu(pl.LightningModule):
         outputs = buff["outputs"]
         # the loss
         loss = self.criterion(logits, labels)
-        reg_term = self.entropy_regu(outputs=outputs, input_ids=input_ids)
+        reg_term = self.entropy_regu(outputs=outputs,
+                                     input_ids=input_ids,
+                                     h_annot=batch["H_annot"],
+                                     pen_type=self.pen_type)
         loss += self.reg_mul * reg_term["pen"]
 
         # the probabilities
         class_pred = torch.softmax(logits, dim=1)
 
-        # plausibility study
-        # put the punctuation to zero for the annotation
-        punct_ids = torch.tensor(list(range(999, 1037))).to(self.device).clone().detach()
-        punct_pos = torch.logical_not(torch.isin(input_ids, punct_ids)).type(torch.uint8).clone().detach()
-        annot = torch.mul(batch["annotations"], punct_pos).clone().detach()
-
         # score for the metrics
         padding = torch.tensor([0]).to(self.device).clone().detach()
         non_pad_pos = torch.logical_not(torch.isin(torch.flatten(input_ids), padding)).clone().detach()
         a_hat = torch.flatten(reg_term["scores"])[non_pad_pos].clone().detach()
-        a_true = torch.flatten(annot)[non_pad_pos].clone().detach()
+        a_true = torch.flatten(batch["annotations"])[non_pad_pos].clone().detach()
 
         return {'loss': loss, 'preds': class_pred, 'target': labels, 'reg_term': reg_term["pen"],
                 'auc': (a_hat, a_true)}
@@ -199,7 +205,7 @@ class BertNliRegu(pl.LightningModule):
     ####################
     def on_train_start(self):
         # init the values for the matrix board
-        init_hp_metrics = {'hp_/acc': 0, 'hp_/auc': 0, 'hp_/reg': 0, 'hp_/loss': 0}
+        init_hp_metrics = {'hp_/acc': 0, 'hp_/auc': 0, 'hp_/reg': 0, 'hp_/loss': 0, 'hp_/auprc': 0}
         self.logger.log_hyperparams(self.hparams, init_hp_metrics)
 
     def training_step(self, train_batch, batch_idx):
@@ -232,7 +238,8 @@ class BertNliRegu(pl.LightningModule):
     def test_step_end(self, output):
         test_acc = self.acc["TEST"](output['preds'], output['target'])
         test_auc = self.auc["TEST"](output["auc"][0], output["auc"][1])
-        test_auprc = self.auprc["TEST"](output['auc'][0], output['auc'][1])
+        test_auprc = self.auprc["TEST"](output["auc"][0], output["auc"][1])
+
         self.log("hp_/reg", output["reg_term"], on_step=False, on_epoch=True, logger=True)
         self.log("hp_/loss", output["loss"], on_step=False, on_epoch=True, logger=True)
         self.log("hp_/acc", test_acc, on_step=False, on_epoch=True, logger=True)
@@ -272,7 +279,7 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--model_type', type=int, default=1)
 
     # default datadir >> ./.cache/dataset >> cache for our datamodule.
-    parser.add_argument('-d', '--data_dir', default=os.path.join(cache, "EsnliDataSet"))
+    parser.add_argument('-d', '--data_dir', default=os.path.join(cache, "datasets", "EsnliDataSet"))
 
     # log_dir for the logger
     parser.add_argument('-s', '--log_dir', default=path.join(cache, 'logs'))
@@ -294,6 +301,7 @@ if __name__ == '__main__':
 
     # config for the regularization
     parser.add_argument('--reg_mul', type=float, default=0)  # the regularize terms
+    parser.add_argument('--pen_type', type=str, default="lasso")  # how to regularize lasso or mse
     parser.add_argument('--lrate', type=float, default=5e-5)  # the learning rate for the training part
 
     args = parser.parse_args()
@@ -309,12 +317,16 @@ if __name__ == '__main__':
 
     # load the data for the training part
     dm = ESNLIDataModule(cache=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers,
-                        nb_data=args.nb_data)
+                         nb_data=args.nb_data)
     dm.prepare_data()  # load the different data
 
     model = None
     if args.model_type == 1:
-        model = BertNliRegu(criterion=nn.CrossEntropyLoss(), reg_mul=args.reg_mul, lr=args.lrate, exp=args.exp)
+        model = BertNliRegu(criterion=nn.CrossEntropyLoss(),
+                            reg_mul=args.reg_mul,
+                            lr=args.lrate,
+                            pen_type=args.pen_type,
+                            exp=args.exp)
 
     ######################
     ### trainer config ###
