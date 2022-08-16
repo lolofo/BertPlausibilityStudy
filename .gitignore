@@ -1,0 +1,33 @@
+
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+
+__pycache__
+*/__pycache__/*
+
+lightning_logs
+*/lightning_logs/*
+
+
+# Mac DS_Store
+.DS_Store
+*/**/.DS_Store
+
+# Py cache
+*/__pycache__/
+*/**/__pycache__/
+
+# Idea
+.idea
+*/**/.idea
+
+# Model checkpoint
+**/*.pt
+**/**/*.pt
+/.cache/
+/.bin/
+
+
+.sh
+*/**/.sh
