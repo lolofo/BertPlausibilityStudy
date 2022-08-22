@@ -14,8 +14,8 @@ Note that to define and to evaluate the plausibility we'll need annotate corpora
 ## Table of Contents
 0.[Configuration](#Configuration)
 1. [E-SNLI](#ESNLI)
-2. [Example2](#HateXPlain)
-3. [Third Example](#YelpHat)
+2. [HateXPlain](#HateXPlain)
+3. [YelpHat](#YelpHat)
 
 ## Configuration
 
