@@ -44,7 +44,7 @@ def L2D(batch):
     return {k: [row[k] for row in batch] for k in batch[0]}
 
 
-class BertNliRegu(pl.LightningModule):
+class BertNliLagrange(pl.LightningModule):
 
     def __init__(self, freeze_bert=False,
                  criterion=nn.CrossEntropyLoss(),
@@ -322,11 +322,11 @@ if __name__ == '__main__':
 
     model = None
     if args.model_type == 1:
-        model = BertNliRegu(criterion=nn.CrossEntropyLoss(),
-                            reg_mul=args.reg_mul,
-                            lr=args.lrate,
-                            pen_type=args.pen_type,
-                            exp=args.exp)
+        model = BertNliLagrange(criterion=nn.CrossEntropyLoss(),
+                                reg_mul=args.reg_mul,
+                                lr=args.lrate,
+                                pen_type=args.pen_type,
+                                exp=args.exp)
 
     ######################
     ### trainer config ###
